@@ -17,6 +17,13 @@ comparable listings can be found, this returns an explicit "no data"
 result rather than fabricating a number — the caller decides how to
 handle that (e.g. block the assessment until a valuation is available).
 
+If an exact make/model search finds nothing, `estimate_vehicle_value_by_
+engine_cc` is a secondary, more speculative fallback: it browses general
+listings and compares against other vehicles of a similar engine capacity
+and manufacture year instead of the exact model. Engine-cc detail-page
+selectors have not been verified at all (unlike the search-results-page
+selectors below), so treat this path with more skepticism.
+
 The sgcarmart URL/selectors/approach here are ported from
 vehicle-valuator's config.py, which documents verifying them against a
 real rendered search on 2026-07-02: sgcarmart is a Next.js app that only
@@ -32,11 +39,35 @@ visible page change.
 """
 from __future__ import annotations
 
+import os
 import re
+import shutil
 import statistics
 from dataclasses import dataclass, field
 from typing import Optional
 from urllib.parse import urlencode
+
+# On hosts where Playwright's own bundled Chromium isn't available (e.g. a
+# `playwright install chromium` was never run, or can't be — Streamlit
+# Community Cloud has no way to run that post-install step), fall back to
+# an apt-installed system Chromium if `packages.txt` requested one. Checked
+# in order: an explicit override, then common Debian/Ubuntu binary names.
+SYSTEM_CHROMIUM_ENV_VAR = "CHROMIUM_EXECUTABLE_PATH"
+SYSTEM_CHROMIUM_CANDIDATES = ["chromium", "chromium-browser"]
+
+
+def _resolve_chromium_executable() -> Optional[str]:
+    """Return a system Chromium path to launch with, or None to let
+    Playwright use its own bundled browser (the normal local-dev path
+    after `playwright install chromium`)."""
+    override = os.environ.get(SYSTEM_CHROMIUM_ENV_VAR)
+    if override:
+        return override
+    for name in SYSTEM_CHROMIUM_CANDIDATES:
+        path = shutil.which(name)
+        if path:
+            return path
+    return None
 
 
 @dataclass
@@ -82,6 +113,7 @@ class Listing:
     price: float
     reg_year: Optional[int] = None
     url: str = ""
+    engine_cc: Optional[float] = None
 
 
 def _clean_int(text: str) -> Optional[float]:
@@ -103,6 +135,29 @@ def _extract_year(text: str) -> Optional[int]:
         return None
     match = re.search(r"(19|20)\d{2}", text)
     return int(match.group(0)) if match else None
+
+
+# Plausible engine displacement range (cc) — filters stray numbers that
+# happen to be followed by "cc" without being an engine spec.
+MIN_PLAUSIBLE_ENGINE_CC = 600
+MAX_PLAUSIBLE_ENGINE_CC = 8_000
+_ENGINE_CC_PATTERN = re.compile(r"([\d,]{3,5})\s*cc\b", re.IGNORECASE)
+
+
+def _extract_engine_cc(text: str) -> Optional[float]:
+    """Pull an engine displacement figure (e.g. "1,798cc") out of raw page
+    text. Unlike the search-results-page selectors above (which
+    vehicle-valuator's config.py documents verifying against a real
+    render), this has NOT been verified against any real sgcarmart detail
+    page — it's a speculative regex scan, used only for the engine-capacity
+    cross-model fallback search."""
+    if not text:
+        return None
+    for match in _ENGINE_CC_PATTERN.finditer(text):
+        value = float(match.group(1).replace(",", ""))
+        if MIN_PLAUSIBLE_ENGINE_CC <= value <= MAX_PLAUSIBLE_ENGINE_CC:
+            return value
+    return None
 
 
 def _try_select(card, selector_key: str) -> str:
@@ -154,6 +209,22 @@ def _fetch_sgcarmart_html_playwright(url: str, page) -> str:
     return page.content()
 
 
+def _launch_chromium(p):
+    """Launch headless Chromium, preferring an apt-installed system browser
+    over Playwright's own bundled one when the latter isn't available (see
+    _resolve_chromium_executable). --no-sandbox/--disable-dev-shm-usage are
+    standard requirements for running headless Chrome as root in a
+    container, which is the common case for cloud hosts."""
+    launch_args = {
+        "headless": True,
+        "args": ["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"],
+    }
+    executable_path = _resolve_chromium_executable()
+    if executable_path:
+        launch_args["executable_path"] = executable_path
+    return p.chromium.launch(**launch_args)
+
+
 def _search_sgcarmart(make: str, model: str, year: int) -> list[Listing]:
     """Best-effort Playwright fetch + parse of sgcarmart search results.
 
@@ -166,7 +237,7 @@ def _search_sgcarmart(make: str, model: str, year: int) -> list[Listing]:
         from playwright.sync_api import sync_playwright
 
         with sync_playwright() as p:
-            browser = p.chromium.launch(headless=True)
+            browser = _launch_chromium(p)
             try:
                 browser_page = browser.new_page()
                 for page_num in range(1, MAX_PAGES_PER_SEARCH + 1):
@@ -188,6 +259,67 @@ def _search_sgcarmart(make: str, model: str, year: int) -> list[Listing]:
     except Exception:
         return []
     return all_listings
+
+
+ENGINE_CC_SEARCH_TOLERANCE_PCT = 0.15  # +/- 15% of the given engine capacity
+ENGINE_CC_YEAR_WINDOW = 3  # wider than YEAR_SEARCH_WINDOW: cross-model, so allow more spread
+MAX_ENGINE_CC_CANDIDATES = 20  # bounds worst-case runtime (one detail-page fetch each)
+
+
+def _search_sgcarmart_by_engine_cc(engine_cc: float, year: int) -> list[Listing]:
+    """Cross-model fallback: when an exact make/model search finds nothing,
+    browse sgcarmart's general used-car listings and keep only ones whose
+    engine capacity (read from each candidate's own detail page) falls
+    within ENGINE_CC_SEARCH_TOLERANCE_PCT of the given cc, as a rough proxy
+    for "similarly-sized/valued vehicle" when no direct comparable exists.
+
+    This is considerably more speculative than _search_sgcarmart: it visits
+    a generic listing URL whose exact behavior with no make/model filter is
+    unconfirmed, and engine-cc detail-page selectors have never been
+    verified at all (see _extract_engine_cc). Treat results from this path
+    with more skepticism than a direct make/model match.
+    """
+    matches: list[Listing] = []
+    try:
+        from playwright.sync_api import sync_playwright
+
+        with sync_playwright() as p:
+            browser = _launch_chromium(p)
+            try:
+                browser_page = browser.new_page()
+                params = {"avl": "", "page": 1}
+                url = f"{SGCARMART_BASE_URL}{SGCARMART_LISTING_PATH}?{urlencode(params)}"
+                html = _fetch_sgcarmart_html_playwright(url, browser_page)
+                candidates = _parse_sgcarmart_listing_page(html)[:MAX_ENGINE_CC_CANDIDATES]
+
+                low_cc = engine_cc * (1 - ENGINE_CC_SEARCH_TOLERANCE_PCT)
+                high_cc = engine_cc * (1 + ENGINE_CC_SEARCH_TOLERANCE_PCT)
+
+                for candidate in candidates:
+                    if not candidate.url:
+                        continue
+                    if candidate.reg_year is not None and abs(candidate.reg_year - year) > ENGINE_CC_YEAR_WINDOW:
+                        continue  # cheap pre-filter before spending a detail-page fetch
+                    try:
+                        detail_html = _fetch_sgcarmart_html_playwright(candidate.url, browser_page)
+                    except Exception:
+                        continue
+                    cc = _extract_engine_cc(detail_html)
+                    if cc is not None and low_cc <= cc <= high_cc:
+                        matches.append(
+                            Listing(
+                                title=candidate.title,
+                                price=candidate.price,
+                                reg_year=candidate.reg_year,
+                                url=candidate.url,
+                                engine_cc=cc,
+                            )
+                        )
+            finally:
+                browser.close()
+    except Exception:
+        return []
+    return matches
 
 
 def _iqr_filter(prices: list[float]) -> tuple[list[float], int]:
@@ -288,7 +420,7 @@ def _scrape_carro_prices(make: str, model: str, year: int) -> list[float]:
         query = f"{make}-{model}-{year}".replace(" ", "-").lower()
         url = f"https://www.carro.sg/buy-used-car/{query}"
         with sync_playwright() as p:
-            browser = p.chromium.launch(headless=True)
+            browser = _launch_chromium(p)
             try:
                 page = browser.new_page()
                 page.goto(url, timeout=15_000)
@@ -325,3 +457,28 @@ def estimate_vehicle_value(make: str, model: str, year: int, use_live_scraping: 
             "which has no browser installed)."
         )
     return ValuationResult(estimated_value=None, source="no_data", notes=[note])
+
+
+def estimate_vehicle_value_by_engine_cc(engine_cc: float, year: int) -> ValuationResult:
+    """Fallback estimate when the exact make/model has no comparable
+    listings: compare against other vehicles of a similar engine capacity
+    and manufacture year instead. Considerably more speculative than
+    `estimate_vehicle_value` — see `_search_sgcarmart_by_engine_cc`."""
+    listings = _search_sgcarmart_by_engine_cc(engine_cc, year)
+    if not listings:
+        return ValuationResult(
+            estimated_value=None,
+            source="no_data",
+            notes=[
+                f"No comparable listings found within {ENGINE_CC_SEARCH_TOLERANCE_PCT:.0%} of "
+                f"{engine_cc:.0f}cc for vehicles from around {year}. A vehicle valuation is "
+                "required before this application can be assessed."
+            ],
+        )
+    result = _estimate_from_listings(listings, target_year=year, source="sgcarmart_engine_cc_scrape")
+    result.notes.append(
+        f"Estimated from {result.sample_size} vehicle(s) of similar engine capacity "
+        f"(~{engine_cc:.0f}cc +/-{ENGINE_CC_SEARCH_TOLERANCE_PCT:.0%}), not the exact make/model — "
+        "treat this as a rougher proxy than a direct match."
+    )
+    return result

@@ -3,9 +3,11 @@ from unittest.mock import patch
 from credit_approver.valuation import (
     Listing,
     _estimate_from_listings,
+    _extract_engine_cc,
     _extract_plausible_prices,
     _iqr_filter,
     estimate_vehicle_value,
+    estimate_vehicle_value_by_engine_cc,
 )
 
 
@@ -129,3 +131,38 @@ def test_estimate_from_listings_low_confidence_for_small_sample():
     listings = [Listing(title="A", price=45000, reg_year=2019)]
     result = _estimate_from_listings(listings, target_year=2019, source="sgcarmart_scrape")
     assert result.confidence == "low"
+
+
+def test_extract_engine_cc_finds_plausible_value():
+    assert _extract_engine_cc("Engine Capacity: 1,798cc, Manual") == 1798.0
+
+
+def test_extract_engine_cc_ignores_out_of_range():
+    # 50cc reads like a moped spec sheet artifact, not a car engine
+    assert _extract_engine_cc("Something 50cc unrelated") is None
+
+
+def test_extract_engine_cc_handles_no_match():
+    assert _extract_engine_cc("No engine spec here.") is None
+
+
+def test_estimate_vehicle_value_by_engine_cc_no_data_when_nothing_found():
+    with patch("credit_approver.valuation._search_sgcarmart_by_engine_cc", return_value=[]):
+        result = estimate_vehicle_value_by_engine_cc(1800, 2010)
+    assert result.estimated_value is None
+    assert result.source == "no_data"
+
+
+def test_estimate_vehicle_value_by_engine_cc_uses_similar_cc_listings():
+    fake_listings = [
+        Listing(title="Honda Civic", price=45000, reg_year=2011, engine_cc=1800),
+        Listing(title="Toyota Corolla", price=47000, reg_year=2009, engine_cc=1800),
+        Listing(title="Mazda 3", price=46000, reg_year=2010, engine_cc=1800),
+    ]
+    with patch(
+        "credit_approver.valuation._search_sgcarmart_by_engine_cc", return_value=fake_listings
+    ):
+        result = estimate_vehicle_value_by_engine_cc(1800, 2010)
+    assert result.source == "sgcarmart_engine_cc_scrape"
+    assert result.estimated_value == 46000
+    assert any("similar engine capacity" in note for note in result.notes)

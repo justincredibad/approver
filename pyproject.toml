@@ -8,7 +8,7 @@ version = "0.1.0"
 description = "Credit-scoring agent for hire-purchase vehicle loans"
 requires-python = ">=3.9"
 dependencies = [
-    "streamlit>=1.30",
+    "streamlit>=1.37",  # st.dialog
     "requests>=2.31",
     "beautifulsoup4>=4.12",
     "playwright>=1.40",
