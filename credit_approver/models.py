@@ -83,6 +83,14 @@ class VehicleLoanApplication:
 
 
 @dataclass
+class AssessmentResult:
+    score: ScoreBreakdown
+    loan: VehicleLoanApplication  # the loan actually assessed (may be LTV-adjusted)
+    ltv_adjusted: bool
+    adjustment_message: str = ""
+
+
+@dataclass
 class ScoreBreakdown:
     dsr: float
     dsr_threshold: float

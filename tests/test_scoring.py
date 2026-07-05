@@ -7,7 +7,8 @@ from credit_approver.models import (
     RelationshipStatus,
     VehicleLoanApplication,
 )
-from credit_approver.scoring import score_applicant
+from credit_approver.ltv import compute_ltv, ltv_threshold
+from credit_approver.scoring import assess_application, score_applicant
 
 
 def strong_applicant():
@@ -76,3 +77,55 @@ def test_score_bounded_between_0_and_100():
     applicant.cbes = CbesRecord(on_time_payment_ratio=0.0, num_defaults=10)
     result = score_applicant(applicant, modest_loan())
     assert 0 <= result.total_score <= 100
+
+
+def test_assess_application_caps_loan_on_ltv_breach_instead_of_rejecting():
+    applicant = strong_applicant()
+    loan = modest_loan()
+    loan.loan_amount = 35000  # 87.5% LTV, above the 70% limit for low OMV
+    assessment = assess_application(applicant, loan)
+
+    assert assessment.ltv_adjusted is True
+    assert "35,000.00" in assessment.adjustment_message
+    assert assessment.loan.loan_amount < loan.loan_amount
+    assert assessment.score.decision != "REJECTED (policy limit exceeded)"
+
+    # The adjusted loan should sit right at (not over) the LTV limit.
+    adjusted_ltv = compute_ltv(assessment.loan)
+    limit = ltv_threshold(assessment.loan.open_market_value)
+    assert adjusted_ltv <= limit + 1e-9
+
+
+def test_assess_application_leaves_compliant_loan_unchanged():
+    applicant = strong_applicant()
+    loan = modest_loan()
+    assessment = assess_application(applicant, loan)
+
+    assert assessment.ltv_adjusted is False
+    assert assessment.loan.loan_amount == loan.loan_amount
+    assert assessment.score.total_score == score_applicant(applicant, loan).total_score
+
+
+def test_assess_application_still_rejects_on_dsr_breach():
+    applicant = strong_applicant()  # annual_income=90000 -> DSR limit 80%
+    # High-value vehicle so a big loan still sits well within the LTV limit,
+    # isolating a DSR breach that auto-adjustment can't fix by capping LTV.
+    loan = VehicleLoanApplication(
+        vehicle_make="Toyota",
+        vehicle_model="Alphard",
+        vehicle_year=2024,
+        coe_expiry=date(2034, 1, 1),
+        open_market_value=100000,
+        purchase_price=1000000,
+        vehicle_valuation=1000000,
+        loan_amount=400000,  # LTV 40%, well under the 60% limit
+        tenure_years=5,
+        interest_rate_pa=0.025,
+    )
+    assert compute_ltv(loan) <= ltv_threshold(loan.open_market_value)  # sanity: not an LTV breach
+
+    assessment = assess_application(applicant, loan)
+
+    # DSR depends on income, not the vehicle, so there's no loan-amount fix for it.
+    assert assessment.ltv_adjusted is False
+    assert assessment.score.decision == "REJECTED (policy limit exceeded)"
