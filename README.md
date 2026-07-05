@@ -23,6 +23,8 @@ Given an applicant's profile and a proposed loan, the agent:
 4. Returns a decision: `AUTO-APPROVED` (score ≥ 80, no policy breach),
    `REFER FOR MANUAL REVIEW` (score 60-79), or `REJECTED` (score < 60, or a
    DSR/LTV policy breach — which forces rejection regardless of score).
+5. Logs every completed assessment in an in-page, downloadable table (see
+   "Assessment log" below).
 
 ## Policy rules
 
@@ -52,6 +54,20 @@ streamlit run credit_approver/app.py
 
 Fill in the applicant, CBES, and vehicle/loan fields and submit to get the
 score, decision, and a per-factor points breakdown.
+
+## Assessment log
+
+Every completed assessment is appended to an in-page log (an expander
+below the results, once at least one assessment has run), showing a
+table of timestamp, applicant/vehicle summary, valuation, loan amounts,
+DSR/LTV, score, and decision — with a "Download log (CSV)" button.
+
+This log only lives in `st.session_state`, so it **only covers the
+current browser session**: it resets on page reload and isn't shared
+across other users or devices. There's no server-side persistence — if
+you need a durable audit trail across restarts and users, that would
+need an external datastore (a hosted database, a spreadsheet API, etc.)
+wired in separately.
 
 ## Run the tests
 
