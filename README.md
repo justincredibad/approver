@@ -7,10 +7,11 @@ Given an applicant's profile and a proposed loan, the agent:
 
 1. Computes **DSR** (debt servicing ratio) and **LTV** (loan-to-value) against
    hard policy limits.
-2. Estimates the vehicle's collateral value: manually-entered comparable
-   listings (most accurate) take priority, then a best-effort Selenium
-   scrape of sgcarmart/carro, falling back to a COE-depreciation estimate
-   off the purchase price if neither is available.
+2. Estimates the vehicle's collateral value: a Playwright scrape of
+   sgcarmart (with carro as a secondary source), reduced to an
+   IQR-outlier-filtered median with a confidence label and +/-10% band,
+   falling back to a COE-depreciation estimate off the purchase price if
+   no listings are found.
 3. Produces a **1-100 creditworthiness score** from DSR/LTV headroom, CBES
    credit bureau record, ACRA litigation history, employment sector, age,
    and relationship status.
@@ -35,6 +36,7 @@ See `credit_approver/dsr.py`, `credit_approver/ltv.py`, and
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -e ".[dev]"
+playwright install chromium  # only needed for live valuation scraping
 ```
 
 ## Run the GUI
@@ -65,19 +67,33 @@ systems:
 - **CBES credit bureau records**: entered manually in the GUI (on-time
   payment ratio, defaults, secured/unsecured balances) rather than pulled
   from a live bureau feed.
-- **Vehicle valuation** (`credit_approver/valuation.py`): prioritizes
-  manually-entered comparable listings (with a COE-remaining adjustment —
-  see `estimate_from_comparables`), then attempts a Selenium scrape of
-  sgcarmart and carro for comparable prices, falling back to a
-  COE-depreciation estimate off the purchase price if neither is
-  available. **The live scrape has not been verified against real
-  markup** — this was developed in a sandboxed environment whose network
-  policy blocks both sgcarmart.com and carro.sg outright, so only the
-  fails-gracefully path has been exercised. Test it against the real
-  sites (from an environment with normal network access) before relying
-  on it; the manual-comparables input is the reliable path in the
-  meantime, especially for low-volume/enthusiast models where live
-  listings are sparse anyway.
+- **Vehicle valuation** (`credit_approver/valuation.py`): scrapes
+  sgcarmart with Playwright (carro as a secondary source if sgcarmart
+  returns nothing), then reduces the listings to a price estimate: Tukey
+  IQR outlier filtering, median, a same-manufacture-year preference when
+  enough listings share it, a +/-10% buffer band, and a sample-size-based
+  confidence label (`high`/`medium`/`low`). Falls back to a
+  COE-depreciation estimate off the purchase price if no listings are
+  found at all.
+
+  The sgcarmart URL/selectors are ported from a companion project
+  ([vehicle-valuator](https://github.com/justincredibad/vehicle-valuator))
+  whose `config.py` documents having verified them against a real
+  rendered search — notably that sgcarmart is a Next.js app which only
+  server-renders loading skeletons, so it requires a real browser
+  (Playwright) rather than a plain HTTP GET. **That verification has not
+  been independently re-confirmed from this codebase** — this development
+  environment's network policy blocks both sgcarmart.com and carro.sg
+  outright, so only the fails-gracefully path has been exercised here,
+  not successful extraction. Re-verify periodically regardless: sgcarmart's
+  CSS-module class names embed a build hash that changes on redeploy.
+
+  Requires `playwright install chromium` after `pip install`. **Does not
+  work on Streamlit Community Cloud** — it has no Chrome/Chromium binary
+  at all, so live scraping will silently fall through to the
+  COE-depreciation estimate there regardless of selector correctness; it
+  only actually runs somewhere with a real browser available (your own
+  machine, a VPS, etc).
 
 ## Note on scoring factors
 
