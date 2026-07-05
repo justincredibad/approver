@@ -121,6 +121,48 @@ systems:
   platform instead (see `vehicle-valuator`'s own README for a Docker-based
   deployment example).
 
+## Running the GUI online with scraping on your own PC
+
+Streamlit Community Cloud's free tier has no browser (see above), so the
+most reliable way to get live valuations into a hosted deployment is to
+run the scraper on a machine that has real network access and Chrome —
+your own PC — and have the hosted GUI call out to it over HTTP.
+
+**1. On your PC**, run the scraper as a small local API:
+```bash
+pip install -e ".[server]"
+playwright install chromium
+python -m credit_approver.scraper_server
+```
+This starts a Flask server on `http://localhost:8800` with two endpoints:
+`/valuation?make=...&model=...&year=...` and
+`/valuation/by-cc?engine_cc=...&year=...`. Check it's alive:
+`curl http://localhost:8800/health`.
+
+**2. Expose it publicly with a tunnel**, e.g. [ngrok](https://ngrok.com):
+```bash
+ngrok http 8800
+```
+This prints a public HTTPS URL (e.g. `https://abcd1234.ngrok-free.app`).
+Your PC and this tunnel need to be running whenever you want the hosted
+app to produce a valuation — ngrok's free tier also gives a new random
+URL each time you restart it, unless you pay for a static domain.
+
+**3. Point the deployed app at that URL.** On Streamlit Community Cloud:
+app settings → **Secrets** → add:
+```toml
+SCRAPER_API_URL = "https://abcd1234.ngrok-free.app"
+```
+(For a local run instead, `export SCRAPER_API_URL=...` works the same
+way — `credit_approver/app.py` checks `st.secrets` first, then the
+environment variable.) Once set, the deployed app calls your PC for
+every valuation instead of trying (and failing) to scrape in-process.
+
+**Security note**: this exposes your local scraper endpoint to anyone who
+has the tunnel URL, with no authentication. Acceptable for a personal
+prototype; not something to leave running unattended for a real
+deployment without adding at least a shared-secret header check.
+
 ## Note on scoring factors
 
 `relationship_status` is included as a scoring input because the original

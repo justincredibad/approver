@@ -2,6 +2,9 @@
 
 Run with: streamlit run credit_approver/app.py
 """
+from __future__ import annotations
+
+import os
 from datetime import date
 
 import streamlit as st
@@ -14,8 +17,16 @@ from credit_approver.models import (
     RelationshipStatus,
     VehicleLoanApplication,
 )
+from credit_approver.remote_scraper_client import (
+    fetch_remote_valuation,
+    fetch_remote_valuation_by_engine_cc,
+)
 from credit_approver.scoring import assess_application
-from credit_approver.valuation import estimate_vehicle_value, estimate_vehicle_value_by_engine_cc
+from credit_approver.valuation import (
+    ValuationResult,
+    estimate_vehicle_value,
+    estimate_vehicle_value_by_engine_cc,
+)
 
 st.set_page_config(page_title="Credit Approver", layout="wide")
 st.title("Hire Purchase Credit Approver")
@@ -23,6 +34,47 @@ st.caption(
     "Prototype credit-scoring agent for vehicle hire-purchase loans. "
     "MyInfo and CBES data are mocked/user-entered — see README for details."
 )
+
+
+def _scraper_api_url() -> str | None:
+    """A configured remote scraper (see credit_approver/scraper_server.py
+    and README) takes priority over in-process scraping — this is how a
+    Chrome-less host like Streamlit Community Cloud gets live valuations
+    from a machine that actually has a browser."""
+    try:
+        url = st.secrets.get("SCRAPER_API_URL")
+        if url:
+            return url
+    except Exception:
+        pass
+    return os.environ.get("SCRAPER_API_URL")
+
+
+def _unreachable_remote_result(base_url: str) -> ValuationResult:
+    return ValuationResult(
+        estimated_value=None,
+        source="no_data",
+        notes=[
+            f"Could not reach the remote scraper API at {base_url} — check that it's "
+            "running locally and the tunnel exposing it is still up."
+        ],
+    )
+
+
+def _get_valuation(make: str, model: str, year: int) -> ValuationResult:
+    base_url = _scraper_api_url()
+    if base_url:
+        result = fetch_remote_valuation(base_url, make, model, year)
+        return result if result is not None else _unreachable_remote_result(base_url)
+    return estimate_vehicle_value(make, model, year, use_live_scraping=True)
+
+
+def _get_valuation_by_engine_cc(engine_cc: float, year: int) -> ValuationResult:
+    base_url = _scraper_api_url()
+    if base_url:
+        result = fetch_remote_valuation_by_engine_cc(base_url, engine_cc, year)
+        return result if result is not None else _unreachable_remote_result(base_url)
+    return estimate_vehicle_value_by_engine_cc(engine_cc, year)
 
 
 @st.dialog("Add engine capacity")
@@ -158,18 +210,15 @@ if pending:
     else:
         st.caption(f"KYC check: {kyc_result.notes}")
 
-    valuation = estimate_vehicle_value(
-        pending["vehicle_make"],
-        pending["vehicle_model"],
-        int(pending["vehicle_year"]),
-        use_live_scraping=True,
+    valuation = _get_valuation(
+        pending["vehicle_make"], pending["vehicle_model"], int(pending["vehicle_year"])
     )
 
     if valuation.estimated_value is None:
         if "engine_cc" not in st.session_state:
             _prompt_for_engine_cc()
             st.stop()
-        valuation = estimate_vehicle_value_by_engine_cc(
+        valuation = _get_valuation_by_engine_cc(
             st.session_state["engine_cc"], int(pending["vehicle_year"])
         )
         if valuation.estimated_value is None:
