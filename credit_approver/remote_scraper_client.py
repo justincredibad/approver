@@ -17,7 +17,13 @@ import requests
 
 from credit_approver.valuation import ValuationResult
 
-DEFAULT_TIMEOUT_SECONDS = 25
+# Real Playwright scraping is slow — multiple page loads plus (for the
+# engine-cc cross-model path) up to MAX_ENGINE_CC_CANDIDATES sequential
+# detail-page fetches. A too-short client timeout gives up and reports
+# "no data" before the scraper ever finishes, which looks identical to a
+# genuine empty result with no indication that it was actually a timeout.
+VALUATION_TIMEOUT_SECONDS = 60
+VALUATION_BY_CC_TIMEOUT_SECONDS = 180
 
 
 def _to_valuation_result(payload: dict) -> ValuationResult:
@@ -34,7 +40,7 @@ def _to_valuation_result(payload: dict) -> ValuationResult:
 
 
 def fetch_remote_valuation(
-    base_url: str, make: str, model: str, year: int, timeout: int = DEFAULT_TIMEOUT_SECONDS
+    base_url: str, make: str, model: str, year: int, timeout: int = VALUATION_TIMEOUT_SECONDS
 ) -> Optional[ValuationResult]:
     try:
         response = requests.get(
@@ -49,7 +55,7 @@ def fetch_remote_valuation(
 
 
 def fetch_remote_valuation_by_engine_cc(
-    base_url: str, engine_cc: float, year: int, timeout: int = DEFAULT_TIMEOUT_SECONDS
+    base_url: str, engine_cc: float, year: int, timeout: int = VALUATION_BY_CC_TIMEOUT_SECONDS
 ) -> Optional[ValuationResult]:
     try:
         response = requests.get(
