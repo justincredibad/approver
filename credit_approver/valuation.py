@@ -285,7 +285,9 @@ def _search_sgcarmart_impl(make: str, model: str, year: int) -> list[Listing]:
 
 ENGINE_CC_SEARCH_TOLERANCE_PCT = 0.15  # +/- 15% of the given engine capacity
 ENGINE_CC_YEAR_WINDOW = 3  # wider than YEAR_SEARCH_WINDOW: cross-model, so allow more spread
-MAX_ENGINE_CC_CANDIDATES = 20  # bounds worst-case runtime (one detail-page fetch each)
+# Bounds worst-case runtime (one detail-page fetch each, up to 15s timeout
+# per fetch) to a few minutes rather than potentially five-plus.
+MAX_ENGINE_CC_CANDIDATES = 10
 
 
 def _search_sgcarmart_by_engine_cc(engine_cc: float, year: int) -> list[Listing]:

@@ -210,17 +210,22 @@ if pending:
     else:
         st.caption(f"KYC check: {kyc_result.notes}")
 
-    valuation = _get_valuation(
-        pending["vehicle_make"], pending["vehicle_model"], int(pending["vehicle_year"])
-    )
+    with st.spinner("Looking up vehicle valuation — a live scrape can take up to a minute..."):
+        valuation = _get_valuation(
+            pending["vehicle_make"], pending["vehicle_model"], int(pending["vehicle_year"])
+        )
 
     if valuation.estimated_value is None:
         if "engine_cc" not in st.session_state:
             _prompt_for_engine_cc()
             st.stop()
-        valuation = _get_valuation_by_engine_cc(
-            st.session_state["engine_cc"], int(pending["vehicle_year"])
-        )
+        with st.spinner(
+            "Searching similar-engine-capacity vehicles — this cross-model search "
+            "checks more listings individually and can take a few minutes..."
+        ):
+            valuation = _get_valuation_by_engine_cc(
+                st.session_state["engine_cc"], int(pending["vehicle_year"])
+            )
         if valuation.estimated_value is None:
             st.error("No vehicle valuation available — cannot assess this application.")
             for note in valuation.notes:
