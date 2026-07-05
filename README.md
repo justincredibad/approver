@@ -120,6 +120,12 @@ systems:
   considerably more speculative still — they've never been verified
   against real markup at all, unlike the search-results-page ones above.
 
+  If you have real network access (i.e. you're not running this from a
+  sandboxed dev environment), run `python scripts/inspect_sgcarmart.py` —
+  it saves the actual rendered page's HTML and a screenshot locally so
+  the selectors above can be corrected against real markup instead of
+  guesswork.
+
   Requires `playwright install chromium` after `pip install` (see Setup
   above) — there's no formula fallback anymore, so a working scrape is
   required for any assessment to complete at all.

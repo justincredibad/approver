@@ -243,6 +243,24 @@ def _launch_chromium(p):
     return p.chromium.launch(**launch_args)
 
 
+def _new_fast_page(browser):
+    """New page with image/media/font requests blocked.
+
+    We only read text out of the HTML, so skipping those resources cuts
+    real page-load time significantly on an ad-heavy site like sgcarmart
+    (this mirrors vehicle-valuator's scraper.py, which calls this out as
+    the single biggest source of latency after browser startup itself).
+    """
+    page = browser.new_page()
+    page.route(
+        "**/*",
+        lambda route: route.abort()
+        if route.request.resource_type in ("image", "media", "font")
+        else route.continue_(),
+    )
+    return page
+
+
 def _search_sgcarmart(make: str, model: str, year: int) -> list[Listing]:
     return _run_in_thread(_search_sgcarmart_impl, make, model, year)
 
@@ -261,7 +279,7 @@ def _search_sgcarmart_impl(make: str, model: str, year: int) -> list[Listing]:
         with sync_playwright() as p:
             browser = _launch_chromium(p)
             try:
-                browser_page = browser.new_page()
+                browser_page = _new_fast_page(browser)
                 for page_num in range(1, MAX_PAGES_PER_SEARCH + 1):
                     params = {"q": f"{make} {model}", "avl": "", "page": page_num}
                     url = f"{SGCARMART_BASE_URL}{SGCARMART_LISTING_PATH}?{urlencode(params)}"
@@ -314,7 +332,7 @@ def _search_sgcarmart_by_engine_cc_impl(engine_cc: float, year: int) -> list[Lis
         with sync_playwright() as p:
             browser = _launch_chromium(p)
             try:
-                browser_page = browser.new_page()
+                browser_page = _new_fast_page(browser)
                 params = {"avl": "", "page": 1}
                 url = f"{SGCARMART_BASE_URL}{SGCARMART_LISTING_PATH}?{urlencode(params)}"
                 html = _fetch_sgcarmart_html_playwright(url, browser_page)
@@ -454,7 +472,7 @@ def _scrape_carro_prices_impl(make: str, model: str, year: int) -> list[float]:
         with sync_playwright() as p:
             browser = _launch_chromium(p)
             try:
-                page = browser.new_page()
+                page = _new_fast_page(browser)
                 page.goto(url, timeout=15_000)
                 return _extract_plausible_prices(page.content())
             finally:

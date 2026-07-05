@@ -7,3 +7,5 @@ dist/
 .venv/
 venv/
 .env
+sgcarmart_rendered.html
+sgcarmart_screenshot.png
