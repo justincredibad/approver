@@ -34,6 +34,34 @@ def test_fallback_valuation_expired_coe():
     assert result.source == "coe_depreciation_estimate"
 
 
+def test_fallback_valuation_older_car_is_worth_less_than_newer_at_same_coe():
+    coe_expiry = date.today() + timedelta(days=365 * 5)
+    newer = estimate_vehicle_value(
+        "Toyota", "Corolla", date.today().year, purchase_price=100000,
+        coe_expiry=coe_expiry, use_live_scraping=False,
+    )
+    older = estimate_vehicle_value(
+        "Toyota", "Corolla", date.today().year - 15, purchase_price=100000,
+        coe_expiry=coe_expiry, use_live_scraping=False,
+    )
+    assert older.estimated_value < newer.estimated_value
+
+
+def test_fallback_valuation_age_discount_is_capped():
+    coe_expiry = date.today() + timedelta(days=365 * 5)
+    ancient = estimate_vehicle_value(
+        "Toyota", "Corolla", date.today().year - 100, purchase_price=100000,
+        coe_expiry=coe_expiry, use_live_scraping=False,
+    )
+    very_old = estimate_vehicle_value(
+        "Toyota", "Corolla", date.today().year - 30, purchase_price=100000,
+        coe_expiry=coe_expiry, use_live_scraping=False,
+    )
+    # Both are past the 50%-floor cutoff (25 years), so they should be equal,
+    # not scaling down indefinitely with age.
+    assert ancient.estimated_value == very_old.estimated_value
+
+
 def test_fallback_valuation_no_coe_expiry_given():
     result = estimate_vehicle_value(
         "Toyota", "Corolla", 2024, purchase_price=100000, coe_expiry=None, use_live_scraping=False

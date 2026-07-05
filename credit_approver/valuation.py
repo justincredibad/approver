@@ -20,10 +20,15 @@ Three estimation paths, in priority order:
    fails-gracefully path has been exercised, not successful extraction.
    Test against the real sites before relying on this in production.
 3. COE-depreciation estimate off the user-entered purchase price, as a
-   last resort when no market data is available at all. This is a rough
-   approximation, not a substitute for a real valuation, and is weaker
-   for low-volume/enthusiast models where price is driven more by
-   condition/mods/rarity than by COE remaining.
+   last resort when no market data is available at all. On top of the
+   COE-remaining discount, this path also applies a mild capped age-based
+   haircut from the vehicle's manufacture year, since two cars with the
+   same remaining COE but very different years aren't usually worth the
+   same. This is a rough approximation, not a substitute for a real
+   valuation, and the age assumption in particular is a bad fit for
+   low-volume/enthusiast/classic models where price is driven more by
+   condition/mods/rarity than by age or COE remaining — supply real
+   `comparables` for those instead.
 """
 from __future__ import annotations
 
@@ -59,16 +64,38 @@ def _remaining_coe_ratio(coe_expiry: Optional[date], today: Optional[date] = Non
     return min(1.0, remaining_days / STANDARD_COE_TENURE_DAYS)
 
 
+# Applied only to the COE-depreciation fallback's non-PARF component, and
+# only capped at a modest 50% floor: it approximates ordinary wear/mileage/
+# tech-obsolescence depreciation for a typical mass-market car. It's a bad
+# assumption for enthusiast/classic/appreciating models (a bigger reason
+# to supply real `comparables` for those instead of relying on this
+# fallback).
+AGE_DEPRECIATION_PER_YEAR = 0.02
+MIN_AGE_MULTIPLIER = 0.5
+
+
+def _age_multiplier(vehicle_year: Optional[int], today: Optional[date] = None) -> float:
+    if vehicle_year is None:
+        return 1.0
+    today = today or date.today()
+    age_years = max(0, today.year - vehicle_year)
+    return max(MIN_AGE_MULTIPLIER, 1 - AGE_DEPRECIATION_PER_YEAR * age_years)
+
+
 def _coe_depreciation_estimate(
     purchase_price: float,
     coe_expiry: Optional[date],
+    vehicle_year: Optional[int] = None,
     today: Optional[date] = None,
 ) -> ValuationResult:
-    """Straight-line depreciation of the COE-dependent portion of value.
+    """Straight-line depreciation of the COE-dependent portion of value,
+    with a mild additional discount for vehicle age.
 
     Singapore-registered vehicles lose their right to be on the road when
     COE expires, so value trends toward a PARF/de-registration floor as
-    COE runs down.
+    COE runs down. On top of that, the non-PARF component gets a capped
+    age-based haircut, since two cars with the same remaining COE but very
+    different manufacture years aren't usually worth the same.
     """
     ratio = _remaining_coe_ratio(coe_expiry, today)
     if ratio <= 0:
@@ -76,7 +103,8 @@ def _coe_depreciation_estimate(
 
     parf_floor = purchase_price * 0.15
     depreciating_component = purchase_price - parf_floor
-    estimated = parf_floor + depreciating_component * ratio
+    age_multiplier = _age_multiplier(vehicle_year, today)
+    estimated = parf_floor + depreciating_component * ratio * age_multiplier
     return ValuationResult(estimated_value=round(estimated, 2), source="coe_depreciation_estimate")
 
 
@@ -223,4 +251,4 @@ def estimate_vehicle_value(
                 source="carro_scrape",
                 sample_size=len(prices),
             )
-    return _coe_depreciation_estimate(purchase_price, coe_expiry)
+    return _coe_depreciation_estimate(purchase_price, coe_expiry, vehicle_year=year)
