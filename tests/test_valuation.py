@@ -1,3 +1,4 @@
+import asyncio
 from unittest.mock import patch
 
 from credit_approver.valuation import (
@@ -6,6 +7,7 @@ from credit_approver.valuation import (
     _extract_engine_cc,
     _extract_plausible_prices,
     _iqr_filter,
+    _run_in_thread,
     estimate_vehicle_value,
     estimate_vehicle_value_by_engine_cc,
 )
@@ -16,6 +18,42 @@ def test_no_data_when_scraping_disabled():
     assert result.estimated_value is None
     assert result.source == "no_data"
     assert result.notes
+
+
+def _has_running_loop() -> bool:
+    try:
+        asyncio.get_running_loop()
+        return True
+    except RuntimeError:
+        return False
+
+
+def test_run_in_thread_escapes_a_running_event_loop():
+    # Reproduces the real-world failure: Streamlit's script-execution
+    # thread can have a running asyncio loop, which Playwright's sync API
+    # refuses to run inside. A plain function call from that context would
+    # still see the loop; _run_in_thread must not.
+    async def check_from_main_thread():
+        return _has_running_loop(), _run_in_thread(_has_running_loop)
+
+    direct_sees_loop, via_thread_sees_loop = asyncio.run(check_from_main_thread())
+    assert direct_sees_loop is True
+    assert via_thread_sees_loop is False
+
+
+def test_run_in_thread_propagates_return_value():
+    assert _run_in_thread(lambda a, b: a + b, 2, 3) == 5
+
+
+def test_run_in_thread_propagates_exceptions():
+    def boom():
+        raise ValueError("expected failure")
+
+    try:
+        _run_in_thread(boom)
+        assert False, "expected ValueError"
+    except ValueError as e:
+        assert str(e) == "expected failure"
 
 
 def test_no_data_when_scraping_finds_nothing():

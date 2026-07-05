@@ -43,9 +43,27 @@ import os
 import re
 import shutil
 import statistics
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Optional
 from urllib.parse import urlencode
+
+
+def _run_in_thread(fn, *args, **kwargs):
+    """Run fn in a fresh OS thread and wait for the result.
+
+    Playwright's sync API raises if called from a thread that already has
+    a running asyncio event loop — which is the case for Streamlit's
+    script-execution thread (and other async-hosting frameworks). A scrape
+    that works fine as a standalone script can silently produce nothing
+    when called from inside Streamlit, because the broad
+    `except Exception: return []` around each scraper swallows that error
+    the same as a genuine network failure. Running in a plain new thread
+    has no event loop of its own, sidestepping the conflict regardless of
+    the caller's context.
+    """
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        return executor.submit(fn, *args, **kwargs).result()
 
 # On hosts where Playwright's own bundled Chromium isn't available (e.g. a
 # `playwright install chromium` was never run, or can't be — Streamlit
@@ -226,6 +244,10 @@ def _launch_chromium(p):
 
 
 def _search_sgcarmart(make: str, model: str, year: int) -> list[Listing]:
+    return _run_in_thread(_search_sgcarmart_impl, make, model, year)
+
+
+def _search_sgcarmart_impl(make: str, model: str, year: int) -> list[Listing]:
     """Best-effort Playwright fetch + parse of sgcarmart search results.
 
     Returns an empty list on any failure (missing playwright, network
@@ -267,6 +289,10 @@ MAX_ENGINE_CC_CANDIDATES = 20  # bounds worst-case runtime (one detail-page fetc
 
 
 def _search_sgcarmart_by_engine_cc(engine_cc: float, year: int) -> list[Listing]:
+    return _run_in_thread(_search_sgcarmart_by_engine_cc_impl, engine_cc, year)
+
+
+def _search_sgcarmart_by_engine_cc_impl(engine_cc: float, year: int) -> list[Listing]:
     """Cross-model fallback: when an exact make/model search finds nothing,
     browse sgcarmart's general used-car listings and keep only ones whose
     engine capacity (read from each candidate's own detail page) falls
@@ -414,6 +440,10 @@ def _extract_plausible_prices(text: str) -> list[float]:
 
 
 def _scrape_carro_prices(make: str, model: str, year: int) -> list[float]:
+    return _run_in_thread(_scrape_carro_prices_impl, make, model, year)
+
+
+def _scrape_carro_prices_impl(make: str, model: str, year: int) -> list[float]:
     try:
         from playwright.sync_api import sync_playwright
 
