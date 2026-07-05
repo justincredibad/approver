@@ -104,10 +104,15 @@ if submitted:
         vehicle_make,
         vehicle_model,
         int(vehicle_year),
-        purchase_price,
-        coe_expiry=coe_expiry,
         use_live_scraping=use_live_scraping,
     )
+
+    if valuation.estimated_value is None:
+        st.error("No vehicle valuation available — cannot assess this application.")
+        for note in valuation.notes:
+            st.caption(note)
+        st.stop()
+
     valuation_msg = f"Vehicle valuation: SGD {valuation.estimated_value:,.2f} (source: {valuation.source}"
     if valuation.sample_size:
         valuation_msg += f", n={valuation.sample_size}"

@@ -9,9 +9,11 @@ Given an applicant's profile and a proposed loan, the agent:
    hard policy limits.
 2. Estimates the vehicle's collateral value: a Playwright scrape of
    sgcarmart (with carro as a secondary source), reduced to an
-   IQR-outlier-filtered median with a confidence label and +/-10% band,
-   falling back to a COE-depreciation estimate off the purchase price if
-   no listings are found.
+   IQR-outlier-filtered median with a confidence label and +/-10% band.
+   Deliberately does **not** derive a value from the purchase price the
+   applicant/dealer entered — that would be circular for the LTV check
+   this feeds. If no comparable listings are found, the application
+   cannot be assessed until one is available.
 3. Produces a **1-100 creditworthiness score** from DSR/LTV headroom, CBES
    credit bureau record, ACRA litigation history, employment sector, age,
    and relationship status.
@@ -72,9 +74,13 @@ systems:
   returns nothing), then reduces the listings to a price estimate: Tukey
   IQR outlier filtering, median, a same-manufacture-year preference when
   enough listings share it, a +/-10% buffer band, and a sample-size-based
-  confidence label (`high`/`medium`/`low`). Falls back to a
-  COE-depreciation estimate off the purchase price if no listings are
-  found at all.
+  confidence label (`high`/`medium`/`low`). If no listings are found, the
+  result is an explicit "no data" state (not a fabricated number) and the
+  GUI blocks assessment until a valuation is available — this
+  deliberately does not fall back to a formula based on the purchase
+  price, since that would let an inflated purchase price flow straight
+  through to an inflated "independent" valuation, defeating the point of
+  the LTV check.
 
   The sgcarmart URL/selectors are ported from a companion project
   ([vehicle-valuator](https://github.com/justincredibad/vehicle-valuator))
@@ -88,12 +94,12 @@ systems:
   not successful extraction. Re-verify periodically regardless: sgcarmart's
   CSS-module class names embed a build hash that changes on redeploy.
 
-  Requires `playwright install chromium` after `pip install`. **Does not
-  work on Streamlit Community Cloud** — it has no Chrome/Chromium binary
-  at all, so live scraping will silently fall through to the
-  COE-depreciation estimate there regardless of selector correctness; it
-  only actually runs somewhere with a real browser available (your own
-  machine, a VPS, etc).
+  Requires `playwright install chromium` after `pip install` (see Setup
+  above). **Does not work on Streamlit Community Cloud** — it has no
+  Chrome/Chromium binary at all, so live scraping (and therefore any
+  assessment at all, since there's no other valuation path) will never
+  succeed there. Run this locally, or anywhere else with both real
+  network access and a real browser installed.
 
 ## Note on scoring factors
 
