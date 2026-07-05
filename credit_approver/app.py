@@ -15,7 +15,7 @@ from credit_approver.models import (
     VehicleLoanApplication,
 )
 from credit_approver.scoring import assess_application
-from credit_approver.valuation import Comparable, estimate_vehicle_value
+from credit_approver.valuation import estimate_vehicle_value
 
 st.set_page_config(page_title="Credit Approver", layout="wide")
 st.title("Hire Purchase Credit Approver")
@@ -88,28 +88,8 @@ with st.form("applicant_form"):
         )
 
     use_live_scraping = st.checkbox(
-        "Attempt live valuation scrape (sgcarmart, requires network + Selenium)", value=False
+        "Attempt live valuation scrape (sgcarmart, then carro)", value=False
     )
-
-    with st.expander("Manual comparable listings (optional, most accurate)"):
-        st.caption(
-            "For niche/low-volume models the live scrape may find nothing and the COE "
-            "depreciation fallback is a rough approximation. If you've found real listings "
-            "yourself (sgcarmart, carro, etc.), enter up to 3 here — each comparable's own "
-            "COE expiry is used to adjust for the difference vs. this application's vehicle."
-        )
-        comp_rows = []
-        for i in range(3):
-            ccol1, ccol2 = st.columns(2)
-            with ccol1:
-                comp_price = st.number_input(
-                    f"Comparable #{i + 1} price (SGD)", min_value=0.0, value=0.0, key=f"comp_price_{i}"
-                )
-            with ccol2:
-                comp_coe = st.date_input(
-                    f"Comparable #{i + 1} COE expiry", value=None, key=f"comp_coe_{i}"
-                )
-            comp_rows.append((comp_price, comp_coe))
 
     submitted = st.form_submit_button("Assess application")
 
@@ -120,12 +100,6 @@ if submitted:
     else:
         st.caption(f"KYC check: {kyc_result.notes}")
 
-    comparables = [
-        Comparable(price=price, coe_expiry=comp_coe)
-        for price, comp_coe in comp_rows
-        if price > 0 and comp_coe is not None
-    ]
-
     valuation = estimate_vehicle_value(
         vehicle_make,
         vehicle_model,
@@ -133,14 +107,18 @@ if submitted:
         purchase_price,
         coe_expiry=coe_expiry,
         use_live_scraping=use_live_scraping,
-        comparables=comparables or None,
     )
-    st.info(
-        f"Vehicle valuation: SGD {valuation.estimated_value:,.2f} "
-        f"(source: {valuation.source}, n={valuation.sample_size})"
-        if valuation.sample_size
-        else f"Vehicle valuation: SGD {valuation.estimated_value:,.2f} (source: {valuation.source})"
-    )
+    valuation_msg = f"Vehicle valuation: SGD {valuation.estimated_value:,.2f} (source: {valuation.source}"
+    if valuation.sample_size:
+        valuation_msg += f", n={valuation.sample_size}"
+    if valuation.confidence:
+        valuation_msg += f", confidence={valuation.confidence}"
+    valuation_msg += ")"
+    st.info(valuation_msg)
+    if valuation.low is not None and valuation.high is not None:
+        st.caption(f"Range: SGD {valuation.low:,.2f} – {valuation.high:,.2f}")
+    for note in valuation.notes:
+        st.caption(note)
 
     cbes = CbesRecord(
         on_time_payment_ratio=on_time_ratio,

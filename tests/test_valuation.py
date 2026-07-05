@@ -1,9 +1,10 @@
 from datetime import date, timedelta
 
 from credit_approver.valuation import (
-    Comparable,
+    Listing,
+    _estimate_from_listings,
     _extract_plausible_prices,
-    estimate_from_comparables,
+    _iqr_filter,
     estimate_vehicle_value,
 )
 
@@ -69,61 +70,6 @@ def test_fallback_valuation_no_coe_expiry_given():
     assert result.estimated_value == 10000
 
 
-def test_comparables_take_priority_over_scraping_and_fallback():
-    today = date(2026, 7, 5)
-    comparables = [
-        Comparable(price=60000, coe_expiry=today + timedelta(days=365 * 2)),
-        Comparable(price=90000, coe_expiry=today + timedelta(days=365 * 8)),
-    ]
-    result = estimate_vehicle_value(
-        "Lotus",
-        "Elise",
-        2010,
-        purchase_price=999999,  # should be ignored entirely once comparables are given
-        coe_expiry=today + timedelta(days=365 * 5),
-        use_live_scraping=False,
-        comparables=comparables,
-    )
-    assert result.source in ("comparable_regression", "comparable_average")
-    assert 60000 <= result.estimated_value <= 90000
-
-
-def test_comparables_regression_extrapolates_with_clean_data():
-    today = date(2026, 7, 5)
-    comparables = [
-        Comparable(price=20000, coe_expiry=today + timedelta(days=365 * 1)),
-        Comparable(price=80000, coe_expiry=today + timedelta(days=365 * 9)),
-    ]
-    result = estimate_from_comparables(comparables, today + timedelta(days=365 * 5), today=today)
-    assert result.source == "comparable_regression"
-    assert result.sample_size == 2
-    # roughly midway between the two comps' remaining-COE ratios
-    assert 40000 < result.estimated_value < 60000
-
-
-def test_comparables_fall_back_to_average_on_noisy_real_world_data():
-    # Real Lotus Elise comps found on the market don't show a clean COE/price
-    # relationship (condition/mods dominate for enthusiast cars) — the fit
-    # comes out with a negative slope, which should be rejected in favor of
-    # a flat average rather than extrapolated.
-    today = date(2026, 7, 5)
-    comparables = [
-        Comparable(price=72800, coe_expiry=date(2029, 10, 31)),
-        Comparable(price=74800, coe_expiry=date(2028, 7, 2)),
-    ]
-    result = estimate_from_comparables(comparables, date(2031, 1, 1), today=today)
-    assert result.source == "comparable_average"
-    assert result.estimated_value == 73800.0
-
-
-def test_estimate_from_comparables_requires_at_least_one():
-    try:
-        estimate_from_comparables([], date(2030, 1, 1))
-        assert False, "expected ValueError"
-    except ValueError:
-        pass
-
-
 def test_extract_plausible_prices_finds_listing_prices():
     # Loosely mimics the visible text of a listing search results page:
     # real prices mixed with unrelated small dollar figures (rebates,
@@ -153,3 +99,54 @@ def test_extract_plausible_prices_ignores_out_of_range_figures():
 
 def test_extract_plausible_prices_handles_no_matches():
     assert _extract_plausible_prices("No prices mentioned here at all.") == []
+
+
+def test_iqr_filter_removes_outlier():
+    prices = [45000, 47000, 46500, 120000, 44000, 48000]  # 120000 is an outlier
+    kept, removed = _iqr_filter(prices)
+    assert 120000 not in kept
+    assert removed == 1
+
+
+def test_iqr_filter_leaves_small_samples_untouched():
+    prices = [45000, 47000, 46500]  # fewer than 4 points, IQR not meaningful
+    kept, removed = _iqr_filter(prices)
+    assert kept == prices
+    assert removed == 0
+
+
+def test_estimate_from_listings_computes_median_with_buffer_and_confidence():
+    listings = [
+        Listing(title="A", price=45000, reg_year=2019),
+        Listing(title="B", price=47000, reg_year=2019),
+        Listing(title="C", price=46500, reg_year=2019),
+        Listing(title="D", price=120000, reg_year=2019),  # outlier
+        Listing(title="E", price=44000, reg_year=2019),
+        Listing(title="F", price=48000, reg_year=2019),
+    ]
+    result = _estimate_from_listings(listings, target_year=2019, source="sgcarmart_scrape")
+
+    assert result.source == "sgcarmart_scrape"
+    assert result.sample_size == 6
+    assert result.outliers_removed == 1
+    assert result.low < result.estimated_value < result.high
+    assert result.confidence in ("low", "medium", "high")
+
+
+def test_estimate_from_listings_prefers_same_year_subset():
+    listings = [
+        Listing(title="A", price=40000, reg_year=2015),
+        Listing(title="B", price=42000, reg_year=2015),
+        Listing(title="C", price=60000, reg_year=2019),
+        Listing(title="D", price=61000, reg_year=2019),
+        Listing(title="E", price=62000, reg_year=2019),
+    ]
+    result = _estimate_from_listings(listings, target_year=2019, source="sgcarmart_scrape")
+    assert result.estimated_value == 61000  # median of the three 2019 listings
+    assert any("2019" in note for note in result.notes)
+
+
+def test_estimate_from_listings_low_confidence_for_small_sample():
+    listings = [Listing(title="A", price=45000, reg_year=2019)]
+    result = _estimate_from_listings(listings, target_year=2019, source="sgcarmart_scrape")
+    assert result.confidence == "low"
