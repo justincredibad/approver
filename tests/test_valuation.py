@@ -1,6 +1,11 @@
 from datetime import date, timedelta
 
-from credit_approver.valuation import Comparable, estimate_from_comparables, estimate_vehicle_value
+from credit_approver.valuation import (
+    Comparable,
+    _extract_plausible_prices,
+    estimate_from_comparables,
+    estimate_vehicle_value,
+)
 
 
 def test_fallback_valuation_no_network():
@@ -89,3 +94,34 @@ def test_estimate_from_comparables_requires_at_least_one():
         assert False, "expected ValueError"
     except ValueError:
         pass
+
+
+def test_extract_plausible_prices_finds_listing_prices():
+    # Loosely mimics the visible text of a listing search results page:
+    # real prices mixed with unrelated small dollar figures (rebates,
+    # instalment teasers) that shouldn't be picked up.
+    page_text = """
+    Lotus Elise SC 1.8 (2010)
+    $72,800
+    Depreciation: $12,500/yr
+    From $88/month*
+
+    Lotus Elise S (2011)
+    $74,800
+    Cashback $500 with this listing
+    """
+    prices = _extract_plausible_prices(page_text)
+    assert 72800.0 in prices
+    assert 74800.0 in prices
+    assert 88.0 not in prices
+    assert 500.0 not in prices
+
+
+def test_extract_plausible_prices_ignores_out_of_range_figures():
+    page_text = "$1,000,000,000 jackpot! Car priced at $45,000 today. Fee: $50."
+    prices = _extract_plausible_prices(page_text)
+    assert prices == [45000.0]
+
+
+def test_extract_plausible_prices_handles_no_matches():
+    assert _extract_plausible_prices("No prices mentioned here at all.") == []
