@@ -4,8 +4,10 @@ Run with: streamlit run credit_approver/app.py
 """
 from __future__ import annotations
 
+import csv
+import io
 import os
-from datetime import date
+from datetime import date, datetime
 
 import streamlit as st
 
@@ -315,5 +317,48 @@ if pending:
         for reason in result.reasons:
             st.write(f"- {reason}")
 
+    st.session_state.setdefault("assessment_log", []).append(
+        {
+            "timestamp": datetime.now().isoformat(timespec="seconds"),
+            "applicant_name": pending["full_name"],
+            "age": int(pending["age"]),
+            "employment_sector": pending["employment_sector"],
+            "annual_income": pending["annual_income"],
+            "vehicle_make": pending["vehicle_make"],
+            "vehicle_model": pending["vehicle_model"],
+            "vehicle_year": int(pending["vehicle_year"]),
+            "valuation": valuation.estimated_value,
+            "valuation_source": valuation.source,
+            "requested_loan_amount": pending["loan_amount"],
+            "assessed_loan_amount": assessment.loan.loan_amount,
+            "ltv_adjusted": assessment.ltv_adjusted,
+            "dsr_pct": round(result.dsr * 100, 1),
+            "ltv_pct": round(result.ltv * 100, 1),
+            "score": result.total_score,
+            "decision": result.decision,
+        }
+    )
+
     st.session_state.pop("pending", None)
     st.session_state.pop("engine_cc", None)
+
+log = st.session_state.get("assessment_log")
+if log:
+    st.divider()
+    with st.expander(f"Assessment log this session ({len(log)} entr{'y' if len(log) == 1 else 'ies'})"):
+        st.dataframe(log)
+
+        buffer = io.StringIO()
+        writer = csv.DictWriter(buffer, fieldnames=list(log[0].keys()))
+        writer.writeheader()
+        writer.writerows(log)
+        st.download_button(
+            "Download log (CSV)",
+            data=buffer.getvalue(),
+            file_name=f"credit_approver_log_{datetime.now():%Y%m%d_%H%M%S}.csv",
+            mime="text/csv",
+        )
+        st.caption(
+            "This log only covers assessments run in your current browser session — "
+            "it resets if the page reloads and isn't shared across other users or devices."
+        )
