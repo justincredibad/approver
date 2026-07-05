@@ -1,4 +1,4 @@
-from datetime import date, timedelta
+from unittest.mock import patch
 
 from credit_approver.valuation import (
     Listing,
@@ -9,65 +9,44 @@ from credit_approver.valuation import (
 )
 
 
-def test_fallback_valuation_no_network():
-    result = estimate_vehicle_value(
-        "Toyota",
-        "Corolla",
-        2024,
-        purchase_price=100000,
-        coe_expiry=date.today() + timedelta(days=365 * 5),
-        use_live_scraping=False,
-    )
-    assert result.source == "coe_depreciation_estimate"
-    assert 0 < result.estimated_value < 100000
+def test_no_data_when_scraping_disabled():
+    result = estimate_vehicle_value("Toyota", "Corolla", 2024, use_live_scraping=False)
+    assert result.estimated_value is None
+    assert result.source == "no_data"
+    assert result.notes
 
 
-def test_fallback_valuation_expired_coe():
-    result = estimate_vehicle_value(
-        "Toyota",
-        "Corolla",
-        2010,
-        purchase_price=100000,
-        coe_expiry=date.today() - timedelta(days=1),
-        use_live_scraping=False,
-    )
-    assert result.estimated_value == 10000
-    assert result.source == "coe_depreciation_estimate"
+def test_no_data_when_scraping_finds_nothing():
+    with patch("credit_approver.valuation._search_sgcarmart", return_value=[]), patch(
+        "credit_approver.valuation._scrape_carro_prices", return_value=[]
+    ):
+        result = estimate_vehicle_value("Lotus", "Elise", 2010, use_live_scraping=True)
+    assert result.estimated_value is None
+    assert result.source == "no_data"
 
 
-def test_fallback_valuation_older_car_is_worth_less_than_newer_at_same_coe():
-    coe_expiry = date.today() + timedelta(days=365 * 5)
-    newer = estimate_vehicle_value(
-        "Toyota", "Corolla", date.today().year, purchase_price=100000,
-        coe_expiry=coe_expiry, use_live_scraping=False,
-    )
-    older = estimate_vehicle_value(
-        "Toyota", "Corolla", date.today().year - 15, purchase_price=100000,
-        coe_expiry=coe_expiry, use_live_scraping=False,
-    )
-    assert older.estimated_value < newer.estimated_value
+def test_sgcarmart_listings_take_priority_over_carro():
+    fake_listings = [
+        Listing(title="A", price=45000, reg_year=2019),
+        Listing(title="B", price=46000, reg_year=2019),
+        Listing(title="C", price=47000, reg_year=2019),
+    ]
+    with patch("credit_approver.valuation._search_sgcarmart", return_value=fake_listings), patch(
+        "credit_approver.valuation._scrape_carro_prices", return_value=[999999]
+    ) as carro_mock:
+        result = estimate_vehicle_value("Toyota", "Corolla", 2019, use_live_scraping=True)
+    assert result.source == "sgcarmart_scrape"
+    assert result.estimated_value == 46000
+    carro_mock.assert_not_called()
 
 
-def test_fallback_valuation_age_discount_is_capped():
-    coe_expiry = date.today() + timedelta(days=365 * 5)
-    ancient = estimate_vehicle_value(
-        "Toyota", "Corolla", date.today().year - 100, purchase_price=100000,
-        coe_expiry=coe_expiry, use_live_scraping=False,
-    )
-    very_old = estimate_vehicle_value(
-        "Toyota", "Corolla", date.today().year - 30, purchase_price=100000,
-        coe_expiry=coe_expiry, use_live_scraping=False,
-    )
-    # Both are past the 50%-floor cutoff (25 years), so they should be equal,
-    # not scaling down indefinitely with age.
-    assert ancient.estimated_value == very_old.estimated_value
-
-
-def test_fallback_valuation_no_coe_expiry_given():
-    result = estimate_vehicle_value(
-        "Toyota", "Corolla", 2024, purchase_price=100000, coe_expiry=None, use_live_scraping=False
-    )
-    assert result.estimated_value == 10000
+def test_carro_used_when_sgcarmart_finds_nothing():
+    with patch("credit_approver.valuation._search_sgcarmart", return_value=[]), patch(
+        "credit_approver.valuation._scrape_carro_prices", return_value=[50000, 52000, 51000]
+    ):
+        result = estimate_vehicle_value("Toyota", "Corolla", 2019, use_live_scraping=True)
+    assert result.source == "carro_scrape"
+    assert result.estimated_value == 51000
 
 
 def test_extract_plausible_prices_finds_listing_prices():

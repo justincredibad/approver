@@ -1,50 +1,47 @@
 """Vehicle collateral valuation.
 
-Two estimation paths, in priority order:
+Purely market-data-driven, following the approach in a companion project
+(github.com/justincredibad/vehicle-valuator): a live scrape of sgcarmart,
+then carro, for the make/model/year, reduced to a statistical estimate —
+Tukey IQR outlier filtering, then median, with a +/-10% buffer band and a
+sample-size-based confidence label. When enough listings share the
+vehicle's exact manufacture year, those are used in preference to the
+full (wider-year) blend.
 
-1. Live scrape of sgcarmart, then carro, for the make/model/year, reduced
-   to a statistical estimate: Tukey IQR outlier filtering, then median,
-   with a +/-10% buffer band and a sample-size-based confidence label.
-   When enough listings share the vehicle's exact manufacture year, those
-   are used in preference to the full (wider-year) blend. This is the
-   most accurate path when real listings are found.
+Deliberately does NOT derive a value from the user-entered purchase
+price. An earlier version had a purchase-price-based COE-depreciation
+formula as a fallback, but that's circular for the LTV check this feeds:
+an inflated purchase price would inflate the "independent" valuation
+right along with it, defeating the point of an independent check. If no
+comparable listings can be found, this returns an explicit "no data"
+result rather than fabricating a number — the caller decides how to
+handle that (e.g. block the assessment until a valuation is available).
 
-   The sgcarmart URL/selectors/approach here are ported from a companion
-   project (github.com/justincredibad/vehicle-valuator) whose config.py
-   documents verifying them against a real rendered search on 2026-07-02:
-   sgcarmart is a Next.js app that only server-renders loading skeletons,
-   so a plain `requests` GET never sees real data — it requires a real
-   browser (Playwright) to render client-side first. That verification
-   has NOT been independently re-confirmed from this codebase — this
-   development environment's network policy blocks sgcarmart.com and
-   carro.sg outright, so only the fails-gracefully path has been
-   exercised here, not successful extraction. Re-verify periodically:
-   sgcarmart's CSS-module class names embed a build hash
-   (e.g. "styles_price__PoUIK") that changes on redeploy even with no
-   visible page change.
-2. COE-depreciation estimate off the user-entered purchase price, as a
-   last resort when no market data is available at all. On top of the
-   COE-remaining discount, this path also applies a mild capped age-based
-   haircut from the vehicle's manufacture year. This is a rough
-   approximation, not a substitute for a real valuation, and is weaker
-   for low-volume/enthusiast/classic models where price is driven more by
-   condition/mods/rarity than by age or COE remaining.
+The sgcarmart URL/selectors/approach here are ported from
+vehicle-valuator's config.py, which documents verifying them against a
+real rendered search on 2026-07-02: sgcarmart is a Next.js app that only
+server-renders loading skeletons, so a plain `requests` GET never sees
+real data — it requires a real browser (Playwright) to render
+client-side first. That verification has NOT been independently
+re-confirmed from this codebase — this development environment's network
+policy blocks sgcarmart.com and carro.sg outright, so only the
+fails-gracefully path has been exercised here, not successful extraction.
+Re-verify periodically: sgcarmart's CSS-module class names embed a build
+hash (e.g. "styles_price__PoUIK") that changes on redeploy even with no
+visible page change.
 """
 from __future__ import annotations
 
 import re
 import statistics
 from dataclasses import dataclass, field
-from datetime import date
 from typing import Optional
 from urllib.parse import urlencode
-
-STANDARD_COE_TENURE_DAYS = 10 * 365
 
 
 @dataclass
 class ValuationResult:
-    estimated_value: float
+    estimated_value: Optional[float]
     source: str
     sample_size: int = 0
     low: Optional[float] = None
@@ -52,57 +49,6 @@ class ValuationResult:
     outliers_removed: int = 0
     confidence: str = ""
     notes: list[str] = field(default_factory=list)
-
-
-def _remaining_coe_ratio(coe_expiry: Optional[date], today: Optional[date] = None) -> float:
-    today = today or date.today()
-    if coe_expiry is None or coe_expiry <= today:
-        return 0.0
-    remaining_days = (coe_expiry - today).days
-    return min(1.0, remaining_days / STANDARD_COE_TENURE_DAYS)
-
-
-# Applied only to the COE-depreciation fallback's non-PARF component, and
-# only capped at a modest 50% floor: it approximates ordinary wear/mileage/
-# tech-obsolescence depreciation for a typical mass-market car. It's a bad
-# assumption for enthusiast/classic/appreciating models (a bigger reason to
-# trust real scraped listings over this fallback for those).
-AGE_DEPRECIATION_PER_YEAR = 0.02
-MIN_AGE_MULTIPLIER = 0.5
-
-
-def _age_multiplier(vehicle_year: Optional[int], today: Optional[date] = None) -> float:
-    if vehicle_year is None:
-        return 1.0
-    today = today or date.today()
-    age_years = max(0, today.year - vehicle_year)
-    return max(MIN_AGE_MULTIPLIER, 1 - AGE_DEPRECIATION_PER_YEAR * age_years)
-
-
-def _coe_depreciation_estimate(
-    purchase_price: float,
-    coe_expiry: Optional[date],
-    vehicle_year: Optional[int] = None,
-    today: Optional[date] = None,
-) -> ValuationResult:
-    """Straight-line depreciation of the COE-dependent portion of value,
-    with a mild additional discount for vehicle age.
-
-    Singapore-registered vehicles lose their right to be on the road when
-    COE expires, so value trends toward a PARF/de-registration floor as
-    COE runs down. On top of that, the non-PARF component gets a capped
-    age-based haircut, since two cars with the same remaining COE but very
-    different manufacture years aren't usually worth the same.
-    """
-    ratio = _remaining_coe_ratio(coe_expiry, today)
-    if ratio <= 0:
-        return ValuationResult(estimated_value=round(purchase_price * 0.1, 2), source="coe_depreciation_estimate")
-
-    parf_floor = purchase_price * 0.15
-    depreciating_component = purchase_price - parf_floor
-    age_multiplier = _age_multiplier(vehicle_year, today)
-    estimated = parf_floor + depreciating_component * ratio * age_multiplier
-    return ValuationResult(estimated_value=round(estimated, 2), source="coe_depreciation_estimate")
 
 
 # ---------------------------------------------------------------------------
@@ -353,14 +299,7 @@ def _scrape_carro_prices(make: str, model: str, year: int) -> list[float]:
         return []
 
 
-def estimate_vehicle_value(
-    make: str,
-    model: str,
-    year: int,
-    purchase_price: float,
-    coe_expiry: Optional[date] = None,
-    use_live_scraping: bool = True,
-) -> ValuationResult:
+def estimate_vehicle_value(make: str, model: str, year: int, use_live_scraping: bool = True) -> ValuationResult:
     if use_live_scraping:
         listings = _search_sgcarmart(make, model, year)
         if listings:
@@ -372,4 +311,17 @@ def estimate_vehicle_value(
                 source="carro_scrape",
                 sample_size=len(prices),
             )
-    return _coe_depreciation_estimate(purchase_price, coe_expiry, vehicle_year=year)
+    if use_live_scraping:
+        note = (
+            "No comparable listings found on sgcarmart or carro for this make/model/year — "
+            "a vehicle valuation is required before this application can be assessed. Try "
+            "widening the search (different model spelling) or check back later."
+        )
+    else:
+        note = (
+            "Live scraping is disabled, so no vehicle valuation was produced — enable it "
+            "and run this from an environment with real network access and a real "
+            "Chrome/Chromium browser (this does not work on Streamlit Community Cloud, "
+            "which has no browser installed)."
+        )
+    return ValuationResult(estimated_value=None, source="no_data", notes=[note])
