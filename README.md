@@ -7,9 +7,10 @@ Given an applicant's profile and a proposed loan, the agent:
 
 1. Computes **DSR** (debt servicing ratio) and **LTV** (loan-to-value) against
    hard policy limits.
-2. Estimates the vehicle's collateral value (Selenium scrape of sgcarmart
-   listings, with a COE-depreciation fallback when scraping isn't
-   available).
+2. Estimates the vehicle's collateral value: manually-entered comparable
+   listings (most accurate) take priority, then a best-effort Selenium
+   scrape of sgcarmart/carro, falling back to a COE-depreciation estimate
+   off the purchase price if neither is available.
 3. Produces a **1-100 creditworthiness score** from DSR/LTV headroom, CBES
    credit bureau record, ACRA litigation history, employment sector, age,
    and relationship status.
@@ -64,11 +65,19 @@ systems:
 - **CBES credit bureau records**: entered manually in the GUI (on-time
   payment ratio, defaults, secured/unsecured balances) rather than pulled
   from a live bureau feed.
-- **Vehicle valuation** (`credit_approver/valuation.py`): attempts a
-  Selenium scrape of sgcarmart listings for comparable prices; falls back
-  to a COE-depreciation estimate if scraping is disabled, unreachable, or
-  the site structure has changed. Selectors are best-effort and may need
-  updating.
+- **Vehicle valuation** (`credit_approver/valuation.py`): prioritizes
+  manually-entered comparable listings (with a COE-remaining adjustment —
+  see `estimate_from_comparables`), then attempts a Selenium scrape of
+  sgcarmart and carro for comparable prices, falling back to a
+  COE-depreciation estimate off the purchase price if neither is
+  available. **The live scrape has not been verified against real
+  markup** — this was developed in a sandboxed environment whose network
+  policy blocks both sgcarmart.com and carro.sg outright, so only the
+  fails-gracefully path has been exercised. Test it against the real
+  sites (from an environment with normal network access) before relying
+  on it; the manual-comparables input is the reliable path in the
+  meantime, especially for low-volume/enthusiast models where live
+  listings are sparse anyway.
 
 ## Note on scoring factors
 

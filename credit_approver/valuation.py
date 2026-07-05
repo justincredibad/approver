@@ -9,8 +9,16 @@ Three estimation paths, in priority order:
    remaining-COE ratios we fit value = floor + slope * remaining_ratio and
    evaluate it at the target car's own ratio. This is the most accurate
    path when real data is available.
-2. Live Selenium scrape of sgcarmart for the make/model/year, used as a
-   flat median (no per-listing COE data extracted yet).
+2. Live Selenium scrape of sgcarmart, then carro, for the make/model/year,
+   used as a flat median (no per-listing COE data extracted yet). Price
+   extraction matches on visible "$X,XXX" text within a plausible car-price
+   range rather than a specific CSS class, so it degrades more gracefully
+   across site redesigns than a class-based selector would — but it has
+   NOT been verified against either site's live markup: this development
+   environment's network policy blocks both domains outright (confirmed
+   via direct request, not just a generic timeout), so only the
+   fails-gracefully path has been exercised, not successful extraction.
+   Test against the real sites before relying on this in production.
 3. COE-depreciation estimate off the user-entered purchase price, as a
    last resort when no market data is available at all. This is a rough
    approximation, not a substitute for a real valuation, and is weaker
@@ -119,15 +127,43 @@ def estimate_from_comparables(
     )
 
 
-def _scrape_sgcarmart_prices(make: str, model: str, year: int) -> list[float]:
-    """Best-effort Selenium scrape of sgcarmart used-car listings.
+# Plausible SGD range for a used-car listing price. Filters out unrelated
+# dollar amounts on the page (rebates, monthly instalment teasers, ads)
+# without depending on any particular CSS class name.
+MIN_PLAUSIBLE_CAR_PRICE = 5_000
+MAX_PLAUSIBLE_CAR_PRICE = 800_000
 
-    Returns an empty list on any failure (missing driver, changed page
-    structure, network block) so callers can fall back gracefully. CSS
-    selectors here are approximate and may need updating if the site
-    changes.
+_PRICE_PATTERN = re.compile(r"\$\s?([\d,]{4,9})")
+
+
+def _extract_plausible_prices(text: str) -> list[float]:
+    """Pull "$X,XXX"-style figures out of raw page text and keep only the
+    ones in a plausible used-car price range.
+
+    This is intentionally not tied to any specific CSS class or DOM
+    structure — those change whenever a site redesigns, silently breaking
+    a selector-based scrape. Matching on the page's visible price
+    formatting instead is more resilient, at the cost of occasionally
+    picking up an unrelated figure (mitigated by the plausibility filter).
     """
-    prices: list[float] = []
+    prices = []
+    for match in _PRICE_PATTERN.finditer(text):
+        value = float(match.group(1).replace(",", ""))
+        if MIN_PLAUSIBLE_CAR_PRICE <= value <= MAX_PLAUSIBLE_CAR_PRICE:
+            prices.append(value)
+    return prices
+
+
+def _scrape_listing_site(url: str) -> list[float]:
+    """Best-effort Selenium fetch of a used-car listing search page.
+
+    Returns an empty list on any failure (missing driver, network block,
+    no matching results) so callers can fall back gracefully. Not verified
+    against live sgcarmart/carro markup — this development environment's
+    network policy blocks both domains, so this has only been tested for
+    graceful failure, not for successful extraction. Test against the real
+    site before relying on it.
+    """
     try:
         from selenium import webdriver
         from selenium.webdriver.chrome.options import Options
@@ -140,18 +176,25 @@ def _scrape_sgcarmart_prices(make: str, model: str, year: int) -> list[float]:
 
         driver = webdriver.Chrome(options=options)
         try:
-            query = f"{make} {model} {year}".replace(" ", "+")
-            driver.get(f"https://www.sgcarmart.com/used_cars/listing.php?BRSR=0&AVL=2&q={query}")
-            elements = driver.find_elements(By.CSS_SELECTOR, ".sgcm-listing__price, .price")
-            for el in elements:
-                match = re.search(r"[\d,]+", el.text)
-                if match:
-                    prices.append(float(match.group().replace(",", "")))
+            driver.get(url)
+            body_text = driver.find_element(By.TAG_NAME, "body").text
+            return _extract_plausible_prices(body_text)
         finally:
             driver.quit()
     except Exception:
         return []
-    return prices
+
+
+def _scrape_sgcarmart_prices(make: str, model: str, year: int) -> list[float]:
+    query = f"{make} {model} {year}".replace(" ", "+")
+    url = f"https://www.sgcarmart.com/used_cars/listing.php?BRSR=0&AVL=2&q={query}"
+    return _scrape_listing_site(url)
+
+
+def _scrape_carro_prices(make: str, model: str, year: int) -> list[float]:
+    query = f"{make}-{model}-{year}".replace(" ", "-").lower()
+    url = f"https://www.carro.sg/buy-used-car/{query}"
+    return _scrape_listing_site(url)
 
 
 def estimate_vehicle_value(
@@ -171,6 +214,13 @@ def estimate_vehicle_value(
             return ValuationResult(
                 estimated_value=round(statistics.median(prices), 2),
                 source="sgcarmart_scrape",
+                sample_size=len(prices),
+            )
+        prices = _scrape_carro_prices(make, model, year)
+        if prices:
+            return ValuationResult(
+                estimated_value=round(statistics.median(prices), 2),
+                source="carro_scrape",
                 sample_size=len(prices),
             )
     return _coe_depreciation_estimate(purchase_price, coe_expiry)
