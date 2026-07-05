@@ -14,8 +14,8 @@ from credit_approver.models import (
     RelationshipStatus,
     VehicleLoanApplication,
 )
-from credit_approver.scoring import score_applicant
-from credit_approver.valuation import estimate_vehicle_value
+from credit_approver.scoring import assess_application
+from credit_approver.valuation import Comparable, estimate_vehicle_value
 
 st.set_page_config(page_title="Credit Approver", layout="wide")
 st.title("Hire Purchase Credit Approver")
@@ -91,6 +91,26 @@ with st.form("applicant_form"):
         "Attempt live valuation scrape (sgcarmart, requires network + Selenium)", value=False
     )
 
+    with st.expander("Manual comparable listings (optional, most accurate)"):
+        st.caption(
+            "For niche/low-volume models the live scrape may find nothing and the COE "
+            "depreciation fallback is a rough approximation. If you've found real listings "
+            "yourself (sgcarmart, carro, etc.), enter up to 3 here — each comparable's own "
+            "COE expiry is used to adjust for the difference vs. this application's vehicle."
+        )
+        comp_rows = []
+        for i in range(3):
+            ccol1, ccol2 = st.columns(2)
+            with ccol1:
+                comp_price = st.number_input(
+                    f"Comparable #{i + 1} price (SGD)", min_value=0.0, value=0.0, key=f"comp_price_{i}"
+                )
+            with ccol2:
+                comp_coe = st.date_input(
+                    f"Comparable #{i + 1} COE expiry", value=None, key=f"comp_coe_{i}"
+                )
+            comp_rows.append((comp_price, comp_coe))
+
     submitted = st.form_submit_button("Assess application")
 
 if submitted:
@@ -100,6 +120,12 @@ if submitted:
     else:
         st.caption(f"KYC check: {kyc_result.notes}")
 
+    comparables = [
+        Comparable(price=price, coe_expiry=comp_coe)
+        for price, comp_coe in comp_rows
+        if price > 0 and comp_coe is not None
+    ]
+
     valuation = estimate_vehicle_value(
         vehicle_make,
         vehicle_model,
@@ -107,9 +133,13 @@ if submitted:
         purchase_price,
         coe_expiry=coe_expiry,
         use_live_scraping=use_live_scraping,
+        comparables=comparables or None,
     )
     st.info(
-        f"Vehicle valuation: SGD {valuation.estimated_value:,.2f} (source: {valuation.source})"
+        f"Vehicle valuation: SGD {valuation.estimated_value:,.2f} "
+        f"(source: {valuation.source}, n={valuation.sample_size})"
+        if valuation.sample_size
+        else f"Vehicle valuation: SGD {valuation.estimated_value:,.2f} (source: {valuation.source})"
     )
 
     cbes = CbesRecord(
@@ -143,10 +173,16 @@ if submitted:
         interest_rate_pa=interest_rate_pa,
     )
 
-    result = score_applicant(applicant, loan)
+    assessment = assess_application(applicant, loan)
+    result = assessment.score
+
+    if assessment.ltv_adjusted:
+        st.warning(assessment.adjustment_message)
 
     st.subheader("Result")
     st.metric("Creditworthiness score", f"{result.total_score} / 100")
+    if assessment.ltv_adjusted:
+        st.caption(f"Loan amount assessed: SGD {assessment.loan.loan_amount:,.2f} (adjusted)")
     if result.decision == "AUTO-APPROVED":
         st.success(result.decision)
     elif result.decision == "REFER FOR MANUAL REVIEW":

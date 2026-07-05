@@ -8,10 +8,13 @@ than soft risk signals.
 """
 from __future__ import annotations
 
+from dataclasses import replace
+
 from .dsr import compute_dsr, dsr_threshold
 from .ltv import compute_ltv, ltv_threshold
 from .models import (
     Applicant,
+    AssessmentResult,
     EmploymentSector,
     RelationshipStatus,
     ScoreBreakdown,
@@ -146,4 +149,41 @@ def score_applicant(applicant: Applicant, loan: VehicleLoanApplication) -> Score
         total_score=total_score,
         decision=decision,
         reasons=reasons,
+    )
+
+
+def assess_application(applicant: Applicant, loan: VehicleLoanApplication) -> AssessmentResult:
+    """Score the application, auto-capping the loan amount to the maximum
+    the vehicle's valuation supports if the requested amount breaches LTV.
+
+    A DSR breach still hard-rejects (that depends on the applicant's
+    income, not the vehicle, so there's no analogous "adjust and retry").
+    An LTV breach, however, just means the applicant asked to borrow more
+    than this specific car supports — capping the request to the max
+    allowed and reassessing is more useful than an outright rejection.
+    """
+    ltv = compute_ltv(loan)
+    ltv_limit = ltv_threshold(loan.open_market_value)
+
+    if ltv > ltv_limit:
+        collateral_value = min(loan.purchase_price, loan.vehicle_valuation)
+        max_loan_amount = round(collateral_value * ltv_limit, 2)
+        message = (
+            f"Requested loan amount of SGD {loan.loan_amount:,.2f} exceeds the maximum "
+            f"loan-to-value limit ({ltv_limit:.0%}) supported by this vehicle's valuation. "
+            f"Loan amount has been adjusted down to SGD {max_loan_amount:,.2f} and the "
+            f"application reassessed."
+        )
+        adjusted_loan = replace(loan, loan_amount=max_loan_amount)
+        return AssessmentResult(
+            score=score_applicant(applicant, adjusted_loan),
+            loan=adjusted_loan,
+            ltv_adjusted=True,
+            adjustment_message=message,
+        )
+
+    return AssessmentResult(
+        score=score_applicant(applicant, loan),
+        loan=loan,
+        ltv_adjusted=False,
     )
